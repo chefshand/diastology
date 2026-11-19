@@ -1,0 +1,40 @@
+{
+  "name": "diastology",
+  "version": "1.0.0",
+  "description": "Diastolic function assessment helper (ASE 2025 and EACVI) for rest and exercise stress echo",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc -p ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chefshand/diastology.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chefshand/diastology/issues"
+  },
+  "homepage": "https://github.com/chefshand/diastology#readme",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.10.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vite-plugin-pwa": "^2.0.0",
+    "vitest": "^5.1.1"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
+}
