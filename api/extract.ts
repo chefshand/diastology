@@ -83,30 +83,82 @@ export async function POST(request: Request): Promise<Response> {
   });
 
   const client = new Anthropic();
-  try {
-    const response = await client.beta.messages.create({
-      model: 'claude-opus-5-5',
-      max_tokens: 4000,
-      betas: ['server-side-fallback-2026-07-01'],
-      fallbacks: 'default',
-      output_config: { effort: img ? 'medium' : 'low', format: { type: 'json_schema', schema: SCHEMA } },
-      system: SYSTEM,
-      messages: [{ role: 'user', content }],
-    });
-    if (response.stop_reason === 'refusal') {
-      return json({ error: 'The model declined to read this input.' }, 422);
+  const effort = img ? 'medium' : 'low';
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content }];
+
+  // Attempt 1: structured output with server-side refusal fallback.
+  // Attempt 2: structured output without the fallback beta.
+  // Attempt 3: plain JSON by instruction (no output_config.format), parsed here.
+  // Only a 400 (request rejected) moves to the next attempt.
+  const attempts: (() => Promise<Anthropic.Beta.BetaMessage>)[] = [
+    () => client.beta.messages.create({
+      model: MODEL, max_tokens: 4000,
+      betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default',
+      output_config: { effort, format: { type: 'json_schema', schema: SCHEMA } },
+      system: SYSTEM, messages,
+    }),
+    () => client.beta.messages.create({
+      model: MODEL, max_tokens: 4000,
+      output_config: { effort, format: { type: 'json_schema', schema: SCHEMA } },
+      system: SYSTEM, messages,
+    }),
+    () => client.beta.messages.create({
+      model: MODEL, max_tokens: 4000,
+      output_config: { effort },
+      system: `${SYSTEM}\n\nRespond with only a JSON object (no prose, no code fences) matching this JSON schema:\n${JSON.stringify(SCHEMA)}`,
+      messages,
+    }),
+  ];
+
+  let lastErr: unknown;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const response = await attempts[i]();
+      if (response.stop_reason === 'refusal') return json({ error: 'The model declined to read this input.' }, 422);
+      const text = response.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      const parsed = parseJson(text);
+      if (!parsed) { lastErr = new SyntaxError('unparseable'); continue; }
+      if (i > 0) console.warn(`extract: succeeded on attempt ${i + 1}`);
+      return json(parsed, 200);
+    } catch (err) {
+      lastErr = err;
+      const msg = apiMessage(err);
+      console.error(`extract attempt ${i + 1} failed:`, err instanceof Anthropic.APIError ? `${err.status} ${msg}` : err);
+      const retryable = err instanceof Anthropic.BadRequestError && !/credit|billing|balance/i.test(msg);
+      if (!retryable) break;
     }
-    const textBlock = response.content.find((b) => b.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') return json({ error: 'No result returned.' }, 502);
-    const parsed = JSON.parse(textBlock.text);
-    return json(parsed, 200);
-  } catch (err) {
-    if (err instanceof Anthropic.RateLimitError) return json({ error: 'Rate limited by the AI service. Try again in a moment.' }, 429);
-    if (err instanceof Anthropic.AuthenticationError) return json({ error: 'The server API key was rejected.' }, 500);
-    if (err instanceof Anthropic.APIError) return json({ error: `AI service error (${err.status ?? 'unknown'}).` }, 502);
-    if (err instanceof SyntaxError) return json({ error: 'Could not parse the AI response.' }, 502);
-    return json({ error: 'Unexpected server error.' }, 500);
   }
+
+  const err = lastErr;
+  const msg = apiMessage(err);
+  if (err instanceof Anthropic.RateLimitError) return json({ error: 'Rate limited by the AI service. Try again in a moment.' }, 429);
+  if (err instanceof Anthropic.AuthenticationError) return json({ error: 'The server API key was rejected. Check ANTHROPIC_API_KEY in Vercel.' }, 500);
+  if (err instanceof Anthropic.PermissionDeniedError) return json({ error: `The API key is not allowed to use this model: ${msg}` }, 500);
+  if (err instanceof Anthropic.APIError) {
+    const hint = /credit|billing|balance/i.test(msg) ? ' Add credit at console.anthropic.com → Billing.' : '';
+    return json({ error: `AI service error (${err.status ?? 'unknown'}): ${msg}${hint}` }, 502);
+  }
+  if (err instanceof SyntaxError) return json({ error: 'Could not parse the AI response. Try again.' }, 502);
+  return json({ error: 'Unexpected server error.' }, 500);
+}
+
+const MODEL = 'claude-opus-5-5';
+
+function apiMessage(err: unknown): string {
+  if (err instanceof Anthropic.APIError) {
+    const body = err.error as { error?: { message?: string } } | undefined;
+    return body?.error?.message ?? err.message;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+function parseJson(text: string): unknown {
+  const t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+  try { return JSON.parse(t); } catch { /* try the outermost object */ }
+  const a = t.indexOf('{');
+  const b = t.lastIndexOf('}');
+  if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch { /* fall through */ } }
+  return undefined;
 }
 
 function json(data: unknown, status: number) {
